@@ -22,6 +22,7 @@ const elements = {
   metrics: document.querySelector("#metrics"),
   assigneeColumns: document.querySelector("#assigneeColumns"),
   dueSoonList: document.querySelector("#dueSoonList"),
+  projectProgressList: document.querySelector("#projectProgressList"),
   projectForm: document.querySelector("#projectForm"),
   projectFormTitle: document.querySelector("#projectFormTitle"),
   projectList: document.querySelector("#projectList"),
@@ -206,14 +207,18 @@ function handleDocumentChange(event) {
 function handleProjectSubmit(event) {
   event.preventDefault();
   const formData = Object.fromEntries(new FormData(elements.projectForm));
+  const milestones = normalizeMilestones(formData.milestoneDone, formData.milestoneTotal);
   const project = {
     id: formData.id || createId(),
     name: formData.name.trim(),
     owner: formData.owner,
     deadline: formData.deadline,
     status: formData.status,
+    milestoneDone: milestones.done,
+    milestoneTotal: milestones.total,
     memo: formData.memo.trim(),
     createdAt: findById(state.projects, formData.id)?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 
   if (formData.id) {
@@ -362,6 +367,7 @@ function render() {
   renderMetrics();
   renderAssigneeColumns();
   renderDueSoon();
+  renderProjectProgress();
   renderProjectSelect();
   renderProjects();
   renderTasks();
@@ -436,6 +442,23 @@ function renderDueSoon() {
 
   elements.dueSoonList.innerHTML = dueSoon.length
     ? dueSoon.map((task) => renderCompactTask(task, true)).join("")
+    : emptyState();
+}
+
+function renderProjectProgress() {
+  const projects = state.projects
+    .slice()
+    .sort((a, b) => {
+      if (a.status === "完了" && b.status !== "完了") return 1;
+      if (a.status !== "完了" && b.status === "完了") return -1;
+      const progressDiff = projectMilestones(a).percent - projectMilestones(b).percent;
+      if (progressDiff !== 0) return progressDiff;
+      return (a.deadline || "9999").localeCompare(b.deadline || "9999");
+    })
+    .slice(0, 8);
+
+  elements.projectProgressList.innerHTML = projects.length
+    ? projects.map(renderProjectProgressItem).join("")
     : emptyState();
 }
 
@@ -646,6 +669,7 @@ function renderCompactTask(task, showProject = false) {
 function renderProjectCard(project) {
   const tasks = state.tasks.filter((task) => task.projectId === project.id);
   const openCount = tasks.filter((task) => task.status !== "完了").length;
+  const milestones = projectMilestones(project);
 
   return `
     <article class="project-card">
@@ -658,6 +682,7 @@ function renderProjectCard(project) {
         <span>${escapeHTML(project.deadline ? `締切 ${formatDate(project.deadline)}` : "締切なし")}</span>
         <span>${escapeHTML(`未完了 ${openCount}`)}</span>
       </div>
+      ${renderProgressMeter(milestones)}
       ${project.memo ? `<div class="note-text">${escapeHTML(project.memo)}</div>` : ""}
       <div class="card-actions">
         <select data-project-status="${escapeHTML(project.id)}" aria-label="プロジェクト状態">
@@ -667,6 +692,37 @@ function renderProjectCard(project) {
         <button class="small-button" data-action="delete-project" data-id="${escapeHTML(project.id)}" type="button">Delete</button>
       </div>
     </article>
+  `;
+}
+
+function renderProjectProgressItem(project) {
+  const milestones = projectMilestones(project);
+  return `
+    <article class="project-progress-item">
+      <div class="project-title">
+        <strong>${escapeHTML(project.name)}</strong>
+        <span class="tag">${escapeHTML(project.owner)}</span>
+      </div>
+      <div class="meta-row">
+        <span class="status-pill ${project.status === "完了" ? "" : statusClass(project.status)}">${escapeHTML(project.status)}</span>
+        <span>${escapeHTML(project.deadline ? `締切 ${formatDate(project.deadline)}` : "締切なし")}</span>
+      </div>
+      ${renderProgressMeter(milestones)}
+    </article>
+  `;
+}
+
+function renderProgressMeter(milestones) {
+  return `
+    <div class="progress-block" aria-label="マイルストーン進捗 ${milestones.done} / ${milestones.total}">
+      <div class="progress-label">
+        <span>Milestones ${escapeHTML(`${milestones.done} / ${milestones.total}`)}</span>
+        <strong>${escapeHTML(`${milestones.percent}%`)}</strong>
+      </div>
+      <div class="progress-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${milestones.percent}">
+        <span class="progress-fill" style="width: ${milestones.percent}%"></span>
+      </div>
+    </div>
   `;
 }
 
@@ -816,7 +872,7 @@ function updateTask(id, patch) {
 
 function updateProject(id, patch) {
   state.projects = state.projects.map((project) =>
-    project.id === id ? { ...project, ...patch } : project,
+    project.id === id ? normalizeProject({ ...project, ...patch, updatedAt: new Date().toISOString() }) : project,
   );
   persist();
   render();
@@ -827,6 +883,8 @@ function resetProjectForm() {
   elements.projectForm.elements.id.value = "";
   elements.projectForm.elements.owner.value = state.currentUser;
   elements.projectForm.elements.status.value = "進行中";
+  elements.projectForm.elements.milestoneDone.value = "0";
+  elements.projectForm.elements.milestoneTotal.value = "0";
   elements.projectFormTitle.textContent = "Project";
 }
 
@@ -939,13 +997,41 @@ function loadState() {
 function normalizeState(raw) {
   return {
     currentUser: USERS.includes(raw?.currentUser) ? raw.currentUser : "N",
-    projects: Array.isArray(raw?.projects) ? raw.projects : [],
+    projects: Array.isArray(raw?.projects) ? raw.projects.map(normalizeProject) : [],
     tasks: Array.isArray(raw?.tasks) ? raw.tasks : [],
     availability: Array.isArray(raw?.availability) ? raw.availability : [],
     timecards: Array.isArray(raw?.timecards) ? raw.timecards : [],
     links: Array.isArray(raw?.links) ? raw.links : [],
     ideas: Array.isArray(raw?.ideas) ? raw.ideas : [],
   };
+}
+
+function normalizeProject(project) {
+  const milestones = normalizeMilestones(project?.milestoneDone, project?.milestoneTotal);
+  return {
+    ...project,
+    milestoneDone: milestones.done,
+    milestoneTotal: milestones.total,
+  };
+}
+
+function normalizeMilestones(doneValue, totalValue) {
+  const total = toNonNegativeInteger(totalValue);
+  const rawDone = toNonNegativeInteger(doneValue);
+  const done = total === 0 ? 0 : Math.min(rawDone, total);
+  return { done, total };
+}
+
+function toNonNegativeInteger(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.floor(number));
+}
+
+function projectMilestones(project) {
+  const { done, total } = normalizeMilestones(project?.milestoneDone, project?.milestoneTotal);
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  return { done, total, percent };
 }
 
 function persist() {

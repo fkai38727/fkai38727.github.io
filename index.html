@@ -67,6 +67,10 @@
             <div class="panel-heading"><h3>締切が近い</h3></div>
             <div class="compact-list" id="dueSoonList"></div>
           </section>
+          <section class="panel project-progress-panel">
+            <div class="panel-heading"><h3>Project progress</h3></div>
+            <div class="project-progress-list" id="projectProgressList"></div>
+          </section>
         </div>
       </section>
 
@@ -86,6 +90,8 @@
               <label>担当<select name="owner"><option value="N">N</option><option value="F">F</option><option value="NF">N/F</option></select></label>
               <label>締切<input name="deadline" type="date" /></label>
               <label>状態<select name="status"><option value="進行中">進行中</option><option value="保留">保留</option><option value="完了">完了</option></select></label>
+              <label>マイルストーン完了<input name="milestoneDone" type="number" min="0" step="1" placeholder="例: 2" /></label>
+              <label>マイルストーン総数<input name="milestoneTotal" type="number" min="0" step="1" placeholder="例: 5" /></label>
               <label class="wide">メモ<textarea name="memo" rows="3" placeholder="目的、決定事項、注意点"></textarea></label>
               <div class="form-actions wide">
                 <button class="primary-button" type="submit">Save Project</button>
