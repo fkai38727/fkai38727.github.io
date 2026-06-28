@@ -179,6 +179,38 @@ textarea:focus-visible,
   color: #fff;
 }
 
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.sync-status[data-tone="ready"] {
+  border-color: #a9d6c6;
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+.sync-status[data-tone="busy"] {
+  border-color: #f0d1a6;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.sync-status[data-tone="error"] {
+  border-color: #e0b4b4;
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .tabbar {
   display: flex;
   gap: 6px;
