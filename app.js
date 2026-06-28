@@ -1,6 +1,10 @@
 const STORAGE_KEY = "nf-project-board-v1";
 const AUTH_KEY = "nf-project-board-unlocked";
 const BOARD_PASSWORD = "narai2001";
+// Paste the deployed Google Apps Script Web App URL here to enable Sheets sync.
+const SHEET_SYNC_URL = "https://script.google.com/macros/s/AKfycbwBbrFdTA8vjnivykzwmXW4xoXjcUHLzissXeuIWSF_2N7fe4PnnayP9j-OKou5kHIG/exec";
+const SHEET_SYNC_TOKEN = BOARD_PASSWORD;
+const SYNC_DEBOUNCE_MS = 900;
 const USERS = ["N", "F"];
 
 const defaultState = {
@@ -17,6 +21,9 @@ let state = loadState();
 let activeTab = "dashboard";
 let selectedDate = toISODate();
 let calendarCursor = firstDayOfMonth(new Date());
+let syncTimer = null;
+let syncInFlight = false;
+let syncNeedsPush = false;
 
 const elements = {
   metrics: document.querySelector("#metrics"),
@@ -51,6 +58,7 @@ const elements = {
   lockForm: document.querySelector("#lockForm"),
   lockPassword: document.querySelector("#lockPassword"),
   lockError: document.querySelector("#lockError"),
+  syncStatus: document.querySelector("#syncStatus"),
 };
 
 initialize();
@@ -63,6 +71,7 @@ function initialize() {
   setFormDefaults();
   bindEvents();
   render();
+  initializeSheetSync();
 }
 
 function bindLockGate() {
@@ -170,6 +179,8 @@ function handleDocumentClick(event) {
   if (!action) return;
 
   if (action === "export") exportData();
+  if (action === "sync-pull") syncFromSheet({ force: true });
+  if (action === "sync-push") syncToSheet({ manual: true });
   if (action === "lock") lockBoard();
   if (action === "reset") resetData();
   if (action === "cancel-project-edit") resetProjectForm();
@@ -246,6 +257,7 @@ function handleTaskSubmit(event) {
     url: formData.url.trim(),
     memo: formData.memo.trim(),
     createdAt: findById(state.tasks, formData.id)?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 
   if (formData.id) {
@@ -865,7 +877,9 @@ function deleteIdea(id) {
 }
 
 function updateTask(id, patch) {
-  state.tasks = state.tasks.map((task) => (task.id === id ? { ...task, ...patch } : task));
+  state.tasks = state.tasks.map((task) =>
+    task.id === id ? normalizeTask({ ...task, ...patch, updatedAt: new Date().toISOString() }) : task,
+  );
   persist();
   render();
 }
@@ -936,6 +950,134 @@ function moveCalendar(action) {
   renderDayDetail();
 }
 
+function initializeSheetSync() {
+  if (!sheetSyncConfigured()) {
+    setSyncStatus("Local only", "muted");
+    return;
+  }
+
+  setSyncStatus("Sync ready", "ready");
+  syncFromSheet({ force: false });
+}
+
+async function syncFromSheet({ force = false } = {}) {
+  if (!sheetSyncConfigured()) {
+    alert("Google Sheets同期URLが未設定です。");
+    setSyncStatus("Local only", "muted");
+    return;
+  }
+
+  if (force && hasBoardData(state) && !confirm("スプシの内容でこの端末のデータを置き換えますか？")) {
+    return;
+  }
+
+  try {
+    setSyncStatus("Pulling...", "busy");
+    const result = await callSheetSync({ action: "load" });
+    const remoteState = normalizeState(result.state || {});
+
+    if (!force && !hasBoardData(remoteState) && hasBoardData(state)) {
+      setSyncStatus("Sheet empty", "busy");
+      await syncToSheet({ manual: true });
+      return;
+    }
+
+    state = remoteState;
+    persist({ skipSync: true });
+    setFormDefaults();
+    render();
+    setSyncStatus(`Synced ${syncTimeLabel()}`, "ready");
+  } catch (error) {
+    console.error(error);
+    setSyncStatus("Sync error", "error");
+  }
+}
+
+async function syncToSheet({ manual = false } = {}) {
+  if (!sheetSyncConfigured()) {
+    if (manual) alert("Google Sheets同期URLが未設定です。");
+    setSyncStatus("Local only", "muted");
+    return;
+  }
+
+  if (syncInFlight) {
+    syncNeedsPush = true;
+    return;
+  }
+
+  clearTimeout(syncTimer);
+  syncInFlight = true;
+  syncNeedsPush = false;
+
+  try {
+    setSyncStatus("Pushing...", "busy");
+    await callSheetSync({ action: "save", state: normalizeState(state) });
+    setSyncStatus(`Synced ${syncTimeLabel()}`, "ready");
+  } catch (error) {
+    console.error(error);
+    setSyncStatus("Sync error", "error");
+  } finally {
+    syncInFlight = false;
+    if (syncNeedsPush) scheduleSheetPush();
+  }
+}
+
+function scheduleSheetPush() {
+  if (!sheetSyncConfigured()) {
+    setSyncStatus("Local only", "muted");
+    return;
+  }
+
+  syncNeedsPush = true;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncToSheet(), SYNC_DEBOUNCE_MS);
+  setSyncStatus("Waiting sync", "busy");
+}
+
+async function callSheetSync(payload) {
+  const response = await fetch(SHEET_SYNC_URL, {
+    method: "POST",
+    body: JSON.stringify({ ...payload, token: SHEET_SYNC_TOKEN }),
+  });
+  const text = await response.text();
+  let parsed = {};
+
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch (error) {
+    throw new Error("同期レスポンスを読み取れませんでした。");
+  }
+
+  if (!response.ok || parsed.ok === false) {
+    throw new Error(parsed.error || `同期に失敗しました (${response.status})`);
+  }
+
+  return parsed;
+}
+
+function sheetSyncConfigured() {
+  return Boolean(SHEET_SYNC_URL.trim());
+}
+
+function setSyncStatus(message, tone = "muted") {
+  if (!elements.syncStatus) return;
+  elements.syncStatus.textContent = message;
+  elements.syncStatus.dataset.tone = tone;
+}
+
+function syncTimeLabel() {
+  return new Intl.DateTimeFormat("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
+}
+
+function hasBoardData(boardState) {
+  return ["projects", "tasks", "availability", "timecards", "links", "ideas"].some(
+    (key) => Array.isArray(boardState?.[key]) && boardState[key].length > 0,
+  );
+}
+
 async function exportData() {
   const payload = {
     ...state,
@@ -998,20 +1140,93 @@ function normalizeState(raw) {
   return {
     currentUser: USERS.includes(raw?.currentUser) ? raw.currentUser : "N",
     projects: Array.isArray(raw?.projects) ? raw.projects.map(normalizeProject) : [],
-    tasks: Array.isArray(raw?.tasks) ? raw.tasks : [],
-    availability: Array.isArray(raw?.availability) ? raw.availability : [],
-    timecards: Array.isArray(raw?.timecards) ? raw.timecards : [],
-    links: Array.isArray(raw?.links) ? raw.links : [],
-    ideas: Array.isArray(raw?.ideas) ? raw.ideas : [],
+    tasks: Array.isArray(raw?.tasks) ? raw.tasks.map(normalizeTask) : [],
+    availability: Array.isArray(raw?.availability) ? raw.availability.map(normalizeAvailability) : [],
+    timecards: Array.isArray(raw?.timecards) ? raw.timecards.map(normalizeTimecard) : [],
+    links: Array.isArray(raw?.links) ? raw.links.map(normalizeLink) : [],
+    ideas: Array.isArray(raw?.ideas) ? raw.ideas.map(normalizeIdea) : [],
   };
 }
 
 function normalizeProject(project) {
   const milestones = normalizeMilestones(project?.milestoneDone, project?.milestoneTotal);
   return {
-    ...project,
+    id: project?.id || createId(),
+    name: project?.name || project?.projectName || "",
+    owner: project?.owner || "N",
+    deadline: project?.deadline || "",
+    status: project?.status || "進行中",
     milestoneDone: milestones.done,
     milestoneTotal: milestones.total,
+    memo: project?.memo || "",
+    createdAt: project?.createdAt || new Date().toISOString(),
+    updatedAt: project?.updatedAt || project?.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeTask(task) {
+  return {
+    id: task?.id || createId(),
+    title: task?.title || task?.task || "",
+    projectId: task?.projectId || "",
+    assignee: task?.assignee || "N",
+    due: task?.due || task?.dueDate || "",
+    priority: task?.priority || "中",
+    status: task?.status || "未着手",
+    url: task?.url || "",
+    memo: task?.memo || "",
+    createdAt: task?.createdAt || new Date().toISOString(),
+    updatedAt: task?.updatedAt || task?.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeAvailability(item) {
+  return {
+    id: item?.id || createId(),
+    date: item?.date || "",
+    user: item?.user || "N",
+    start: item?.start || "",
+    end: item?.end || "",
+    status: item?.status || "available",
+    note: item?.note || "",
+    createdAt: item?.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeTimecard(item) {
+  return {
+    id: item?.id || createId(),
+    date: item?.date || "",
+    user: item?.user || "N",
+    start: item?.start || "",
+    end: item?.end || "",
+    breakMinutes: Number(item?.breakMinutes || 0),
+    note: item?.note || "",
+    createdAt: item?.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeLink(link) {
+  return {
+    id: link?.id || createId(),
+    title: link?.title || "",
+    category: link?.category || "",
+    owner: link?.owner || "共通",
+    url: link?.url || "",
+    note: link?.note || "",
+    createdAt: link?.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeIdea(idea) {
+  return {
+    id: idea?.id || createId(),
+    title: idea?.title || "",
+    owner: idea?.owner || "N",
+    tags: idea?.tags || "",
+    body: idea?.body || "",
+    status: idea?.status || "メモ",
+    createdAt: idea?.createdAt || new Date().toISOString(),
   };
 }
 
@@ -1034,8 +1249,9 @@ function projectMilestones(project) {
   return { done, total, percent };
 }
 
-function persist() {
+function persist({ skipSync = false } = {}) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (!skipSync) scheduleSheetPush();
 }
 
 function tasksForAssignee(user) {
